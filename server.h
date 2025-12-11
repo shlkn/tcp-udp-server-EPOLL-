@@ -15,6 +15,11 @@ constexpr int tcpPort = 10001;
 constexpr int udpPort = 10002;
 constexpr int maxPayloadChunk = 2048;
 
+using FileDiscriptor = int;
+using IPv4Addr = struct sockaddr_in;
+using SocketLen = socklen_t;
+using GenericAddr = struct sockaddr;
+
 struct ServerStats 
 {
     int totalClients = 0;
@@ -30,26 +35,29 @@ public:
 	void start();
 
 private:
-	int tcpListenSock = -1;
-	int udpSock = -1;
-	int epoll_fd = -1;
+	FileDiscriptor tcpListenSock = -1;
+	FileDiscriptor udpSock = -1;
+	FileDiscriptor epoll = -1;
+	std::vector<FileDiscriptor> clientsSockets;
 	bool isServerRunning = true;
-	std::vector<int> clientsSockets; // TODO - всем дескрипторам сделать псевдоним через using
 	ServerStats serverStats;
 
-	bool setNonblocking(int socket);
+	bool setNonblocking(FileDiscriptor socket);
 	bool intializeTCP();
 	bool initializeUDP();
 
 	bool createEpoll();
-	bool addSocketToEpoll(int sockToAdd);
+	bool addSocketToEpoll(FileDiscriptor sockToAdd);
 
-	void processSocketTCP(int current_fd);
-	void processClientsSockets(int current_fd);
-	void messageHandler(int sock, char* buf, size_t len, bool is_udp = false,
-                    struct sockaddr_in* udp_addr = nullptr, socklen_t udp_len = 0);
-	void sendMessage(int sock, const char* msg, size_t len, bool is_udp,
-                  struct sockaddr_in* udp_addr = nullptr, socklen_t udp_len = 0);
+	void processSocketTCP(FileDiscriptor &tcpListenSock);
+	void processClientsSockets(FileDiscriptor &sock);
+	void processClientsTCP(FileDiscriptor &sock);
+	void processClientsUDP(FileDiscriptor &sock);
+
+	void messageHandler(FileDiscriptor sock, char* buf, size_t len, bool isUdp = false,
+                    GenericAddr* udpAddr = nullptr, SocketLen udpLen = 0);
+	void sendMessage(FileDiscriptor sock, const char* msg, size_t len, bool isUdp,
+                  GenericAddr* udpAddr = nullptr, SocketLen udpLen = 0);
 
 	void closeInstance(int &fdToClose);
 };

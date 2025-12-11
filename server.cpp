@@ -1,6 +1,6 @@
 #include "server.h"
 
-bool Server::setNonblocking(int socket) 
+bool Server::setNonblocking(FileDiscriptor socket) 
 {
     int flags = fcntl(socket, F_GETFL, 0);
     if(flags == -1) 
@@ -14,7 +14,7 @@ bool Server::setNonblocking(int socket)
 
 bool Server::intializeTCP()
 {
-    struct sockaddr_in server_addr;
+    IPv4Addr serverAddr;
 
     tcpListenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if(tcpListenSock == -1)
@@ -24,22 +24,19 @@ bool Server::intializeTCP()
     if(setsockopt(tcpListenSock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) == -1)
     	return false; // TODO - писать в поток лога
 
-    // memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(tcpPort);
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(tcpPort);
 
-    if(bind(tcpListenSock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1)
+    if(bind(tcpListenSock, reinterpret_cast<GenericAddr*>(&serverAddr), sizeof(serverAddr)) == -1)
     {
         closeInstance(tcpListenSock);
-        tcpListenSock = -1;
         return false;
     }
 
     if(listen(tcpListenSock, SOMAXCONN) == -1) 
     {
         closeInstance(tcpListenSock);
-        tcpListenSock = -1;
         return false;
     }
 
@@ -48,7 +45,7 @@ bool Server::intializeTCP()
 
 bool Server::initializeUDP()
 {
-    struct sockaddr_in server_addr;
+    IPv4Addr serverAddr;
 
     udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if(udpSock == -1)
@@ -61,12 +58,11 @@ bool Server::initializeUDP()
         return false;
     }
 
-    // memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(udpPort);
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(udpPort);
 
-    if(bind(udpSock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1)
+    if(bind(udpSock, (GenericAddr*)&serverAddr, sizeof(serverAddr)) == -1)
     {
         closeInstance(udpSock);
         return false;
@@ -77,14 +73,14 @@ bool Server::initializeUDP()
 
 bool Server::createEpoll()
 {
-	epoll_fd = epoll_create1(0);
-    if(epoll_fd == -1) 
+	epoll = epoll_create1(0);
+    if(epoll == -1) 
         return false;
 
     return true;
 }
 
-bool Server::addSocketToEpoll(int sockToAdd)
+bool Server::addSocketToEpoll(FileDiscriptor sockToAdd)
 {
 	if(sockToAdd == -1)
 		return false;
@@ -92,7 +88,7 @@ bool Server::addSocketToEpoll(int sockToAdd)
 	struct epoll_event event;
     event.events = EPOLLIN | EPOLLET;
     event.data.fd = sockToAdd;
-    if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sockToAdd, &event) == -1)
+    if(epoll_ctl(epoll, EPOLL_CTL_ADD, sockToAdd, &event) == -1)
         return false;
 
     return true;
@@ -124,35 +120,36 @@ void Server::start()
 	struct epoll_event events[maxEvents];
 	while(isServerRunning) // главный цикл сервера
 	{
-        int num_ready = epoll_wait(epoll_fd, events, maxEvents, -1);
-        if(num_ready == -1)
+        int numReady = epoll_wait(epoll, events, maxEvents, -1);
+        if(numReady == -1)
         {
         	std::cout << "error in main loop. Exiting..." << std::endl;
         	return;
         }
 
-        for (int i = 0; i < num_ready; ++i) 
+        for (int i = 0; i < numReady; ++i) 
         {
-            int current_fd = events[i].data.fd;
+            int sock = events[i].data.fd;
 
-            if(current_fd == tcpListenSock) 
-            	processSocketTCP(current_fd);
+            if(sock == tcpListenSock) 
+            	processSocketTCP(sock);
             else 
-            	processClientsSockets(current_fd); //обработка клиентов и udp сокета
+            	processClientsSockets(sock); //обработка клиентов и udp сокета
         }
     }
 
 }
 
-void Server::processSocketTCP(int current_fd)
+void Server::processSocketTCP(FileDiscriptor &tcpListenSock)
 {
     while(true) 
     {   
     	// Принимаем запрос на подключение
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-        int client_sock = accept(tcpListenSock, (struct sockaddr*)&client_addr, &client_len);
-        if(client_sock == -1)
+        IPv4Addr clientAddr;
+        SocketLen clientLen = sizeof(clientAddr);
+
+        FileDiscriptor clientSock = accept(tcpListenSock, reinterpret_cast<GenericAddr*>(&clientAddr), &clientLen);
+        if(clientSock == -1)
         {
             if(errno == EAGAIN || errno == EWOULDBLOCK) 
                 break; // больше нет подключений
@@ -163,111 +160,132 @@ void Server::processSocketTCP(int current_fd)
             }
         }
 
-        if(!setNonblocking(client_sock) || !addSocketToEpoll(client_sock))
+        if(!setNonblocking(clientSock) || !addSocketToEpoll(clientSock))
         {
         	std::cout << "can`t create client`s socket" << std::endl;
-        	closeInstance(client_sock);
+        	closeInstance(clientSock);
         }
 
-        clientsSockets.push_back(client_sock);
+        clientsSockets.push_back(clientSock);
         serverStats.totalClients += 1;
         serverStats.connectedClients += 1;
     }
 }
 
-void Server::processClientsSockets(int current_fd)
+void Server::processClientsSockets(FileDiscriptor &sock)
 {
-    char buf[maxPayloadChunk];
-    if(current_fd != udpSock) 
+    if(sock != udpSock) 
+    	processClientsTCP(sock);
+    else
+    	processClientsUDP(sock);
+}
+
+void Server::processClientsTCP(FileDiscriptor &sock)
+{
+	char buf[maxPayloadChunk];
+    while(true) 
     {
-        while(true) 
+        int bytes = recv(sock, buf, sizeof(buf), 0);
+
+        if(bytes > 0) 
+            messageHandler(sock, buf, bytes); // обрабатываем команды или зеркалим сообщение
+
+        else if(bytes == 0) // клиент закрыл соединение
         {
-            int bytes = recv(current_fd, buf, sizeof(buf), 0);
+            closeInstance(sock);
+            
+            clientsSockets.erase(std::remove(clientsSockets.begin(), clientsSockets.end(),
+             sock), clientsSockets.end());
 
-            if(bytes > 0) 
-                messageHandler(current_fd, buf, bytes); // обрабатываем команды или зеркалим сообщение
+            serverStats.connectedClients -= 1;
+            break;
+        }
+        else if(bytes == -1)
+        {
+            if(errno == EAGAIN || errno == EWOULDBLOCK) 
+                break; // данные закончились
 
-            else if(bytes == 0) // клиент закрыл соединение
+            else // ошибка сокета
             {
-                closeInstance(current_fd);
                 
-                clientsSockets.erase(std::remove(clientsSockets.begin(), clientsSockets.end(),
-                 current_fd), clientsSockets.end());
+                std::cout << "socket error, closing socket..." << std::endl;
+                closeInstance(sock);
+            	clientsSockets.erase(std::remove(clientsSockets.begin(), clientsSockets.end(),
+             	sock), clientsSockets.end());
 
                 serverStats.connectedClients -= 1;
                 break;
             }
-            else 
-            {
-                if(errno == EAGAIN || errno == EWOULDBLOCK) 
-                    break; // данные закончились
-
-                else // ошибка сокета
-                {
-                    
-                    std::cout << "socket error, closing socket..." << std::endl;
-                    closeInstance(current_fd);
-                	clientsSockets.erase(std::remove(clientsSockets.begin(), clientsSockets.end(),
-                 	current_fd), clientsSockets.end());
-
-                    serverStats.connectedClients -= 1;
-                    break;
-                }
-            }
         }
-    } 
-    else // обработка UDP сокета
-    {
-        struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-
-        int bytes = recvfrom(udpSock, buf, sizeof(buf), 0,
-                             (struct sockaddr*)&client_addr, &addr_len);
-
-        if(bytes > 0)
-            messageHandler(udpSock, buf, bytes, true, &client_addr, addr_len);
     }
 }
 
-void Server::messageHandler(int sock, char* buf, size_t len, bool is_udp,
-                    struct sockaddr_in* udp_addr, socklen_t udp_len)
+void Server::processClientsUDP(FileDiscriptor &sock)
+{
+	char buf[maxPayloadChunk];
+    while(true) 
+    {
+	    IPv4Addr clientAddr;
+	    SocketLen addrLen = sizeof(clientAddr);
+
+	    int bytes = recvfrom(udpSock, buf, sizeof(buf), 0,
+	                         reinterpret_cast<GenericAddr*>(&clientAddr), &addrLen);
+
+	    if(bytes > 0)
+	        messageHandler(udpSock, buf, bytes, true, reinterpret_cast<GenericAddr*>(&clientAddr), addrLen);
+	    else
+	    {
+	    	if((errno == EAGAIN || errno == EWOULDBLOCK)) 
+        		break; // данные закончились
+        	else
+        	{
+        		std::cout << "problem has ocured on udp socket. skipping...";
+        		break;
+        	}
+	    }
+	}
+}
+
+void Server::messageHandler(FileDiscriptor sock, char* buf, size_t len, bool isUdp,
+                    GenericAddr* udpAddr, socklen_t udpLen)
 {
     if(buf[0] == '/') 
     {
         std::string response;
 
-        if(strncmp(buf, "/time", 5) == 0) 
+        if(strncmp(buf, "/time", 5) == 0 && len == 5) 
         {
             std::time_t now = std::time(nullptr);
-            char time_buf[64];
-            std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
-            response = time_buf;
+            char timeBuf[64];
+            std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+            response = timeBuf;
 
-            sendMessage(sock, response.c_str(), response.size(), is_udp, udp_addr, udp_len);
+            sendMessage(sock, response.c_str(), response.size(), isUdp, udpAddr, udpLen);
 
         } 
-        else if(strncmp(buf, "/stats", 6) == 0) 
+        else if(strncmp(buf, "/stats", 6) == 0 && len == 6) 
         {
             response = "Total clients: " + std::to_string(serverStats.totalClients) +
                        ", Connected now: " + std::to_string(serverStats.connectedClients);
 
-            sendMessage(sock, response.c_str(), response.size(), is_udp, udp_addr, udp_len);
+            sendMessage(sock, response.c_str(), response.size(), isUdp, udpAddr, udpLen);
 
         } 
-        else if(strncmp(buf, "/shutdown", 9) == 0) 
+        else if(strncmp(buf, "/shutdown", 9) == 0 && len == 9) 
         {
             std::cout << "Shutdown command received! server shutting down..." << std::endl;
 			isServerRunning = false;
+			closeInstance(epoll);
         } 
         else 
         	std::cout << "unknown command. skipping..." << std::endl;
 
     }
     else 
-        sendMessage(sock, buf, len, is_udp, udp_addr, udp_len); // зеркалим сообщение
+        sendMessage(sock, buf, len, isUdp, udpAddr, udpLen); // зеркалим сообщение
 }
 
-void Server::closeInstance(int &fdToClose)
+void Server::closeInstance(FileDiscriptor &fdToClose)
 {
 	if(fdToClose >= 0)
 	{
@@ -284,14 +302,14 @@ Server::~Server()
 	for(auto clientSock : clientsSockets)
 		closeInstance(clientSock);
 
-	closeInstance(epoll_fd);
+	closeInstance(epoll);
 }
 
-void Server::sendMessage(int sock, const char* msg, size_t len, bool is_udp,
-                  struct sockaddr_in* udp_addr, socklen_t udp_len) 
+void Server::sendMessage(FileDiscriptor sock, const char* msg, size_t len, bool isUdp,
+                  GenericAddr* udpAddr, socklen_t udpLen) 
 {
-    if(is_udp && udp_addr)
-        sendto(sock, msg, len, 0, (struct sockaddr*)udp_addr, udp_len);
+    if(isUdp && udpAddr)
+        sendto(sock, msg, len, 0, udpAddr, udpLen);
     else 
         send(sock, msg, len, 0);
     
